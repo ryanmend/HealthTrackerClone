@@ -5,6 +5,8 @@ import sqlite3
 import os
 import hashlib
 import re
+import random
+import string
 from datetime import date
 
 st.set_page_config(page_title="Weight Tracker", layout="wide")
@@ -48,16 +50,7 @@ if "page" not in st.session_state:
     st.session_state["page"] = "Login"
 
 
-
-
-
-
-
-
-
-
-
-# Database Connection
+# ─────────────────────────── Database Connection ───────────────────────────
 dbPath = os.path.join(os.getcwd(), "project.db")
 
 @st.cache_resource
@@ -65,46 +58,58 @@ def get_connection():
     connection = sqlite3.connect(dbPath, check_same_thread=False)
     cursor = connection.cursor()
 
-    ## User table
+    # User table  (email added)
     cursor.execute(
         """
 CREATE TABLE IF NOT EXISTS users (
     username TEXT PRIMARY KEY,
-    password TEXT
+    password TEXT,
+    email    TEXT UNIQUE
 )
 """
     )
 
+    # Migrate: add email column if it does not exist yet
+    try:
+        cursor.execute("ALTER TABLE users ADD COLUMN email TEXT UNIQUE")
+        connection.commit()
+    except sqlite3.OperationalError:
+        pass  # column already exists
 
-    #Profile
+    # Profile table (email included)
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS profiles(
         username TEXT PRIMARY KEY,
-        height REAL,
-        age INTEGER,
-        sex TEXT
+        height   REAL,
+        age      INTEGER,
+        sex      TEXT,
+        email    TEXT
         )
         """)
 
-    #Goal Table
+    # Migrate: add email column to profiles if missing
+    try:
+        cursor.execute("ALTER TABLE profiles ADD COLUMN email TEXT")
+        connection.commit()
+    except sqlite3.OperationalError:
+        pass
+
+    # Goal table
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS goals (
-        username TEXT PRIMARY KEY,
+        username    TEXT PRIMARY KEY,
         goal_weight REAL
-    )                              
+    )
     """)
 
-
-
-
-    # Create Records Table
+    # Records table
     cursor.execute(
         """
 CREATE TABLE IF NOT EXISTS records (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT,
-    weight REAL,
-    date DATE
+    weight   REAL,
+    date     DATE
 )
 """
     )
@@ -115,30 +120,24 @@ CREATE TABLE IF NOT EXISTS records (
 connection, cursor = get_connection()
 
 
-##Hashing Function
+# ─────────────────────────── Hashing ───────────────────────────────────────
 def hashPassword(password: str) -> str:
     """Returns the SHA-256 hash of the given password."""
     return hashlib.sha256(password.encode()).hexdigest()
 
 
+def generateRandomPassword(length: int = 10) -> str:
+    """Generate a random password of given length."""
+    chars = string.ascii_letters + string.digits + "!@#$%"
+    return "".join(random.choices(chars, k=length))
 
 
-
-
-
-
-
-
-
-
-
-
-## Authentication Functions
-def createUser(username: str, password: str):
+# ─────────────────────────── Auth / User Functions ─────────────────────────
+def createUser(username: str, password: str, email: str):
     try:
         cursor.execute(
-            "INSERT INTO users (username, password) VALUES (?, ?)",
-            (username, hashPassword(password)),
+            "INSERT INTO users (username, password, email) VALUES (?, ?, ?)",
+            (username, hashPassword(password), email.lower().strip()),
         )
         connection.commit()
         return True
@@ -154,6 +153,54 @@ def loginUser(username: str, password: str):
     return cursor.fetchone()
 
 
+def getUserEmail(username: str):
+    cursor.execute("SELECT email FROM users WHERE username = ?", (username,))
+    result = cursor.fetchone()
+    return result[0] if result else None
+
+
+def updateUserEmail(username: str, email: str):
+    cursor.execute(
+        "UPDATE users SET email = ? WHERE username = ?",
+        (email.lower().strip(), username),
+    )
+    connection.commit()
+
+
+# ─────────────────────── Forgot Password / Username ────────────────────────
+def forgotPassword(username: str):
+    """
+    If the username exists, generate a new random password, store its hash,
+    and return (email, new_plain_password).  Returns (None, None) if not found.
+    """
+    cursor.execute("SELECT email FROM users WHERE username = ?", (username,))
+    row = cursor.fetchone()
+    if not row:
+        return None, None
+    email = row[0]
+    new_pw = generateRandomPassword()
+    cursor.execute(
+        "UPDATE users SET password = ? WHERE username = ?",
+        (hashPassword(new_pw), username),
+    )
+    connection.commit()
+    return email, new_pw
+
+
+def forgotUsername(email: str):
+    """
+    Look up a username by email address.
+    Returns the username string, or None if not found.
+    """
+    cursor.execute(
+        "SELECT username FROM users WHERE email = ?",
+        (email.lower().strip(),),
+    )
+    row = cursor.fetchone()
+    return row[0] if row else None
+
+
+# ─────────────────────────── Goal Functions ────────────────────────────────
 def setGoal(username: str, goal: float):
     cursor.execute(
         "INSERT OR REPLACE INTO goals (username, goal_weight) VALUES(?, ?)",
@@ -166,62 +213,55 @@ def getGoal(username: str):
         "SELECT goal_weight FROM goals WHERE username = ?",
         (username,),
     )
-
     result = cursor.fetchone()
     return result[0] if result else None
 
-def setProfile(username, height, age, sex):
+
+# ─────────────────────────── Profile Functions ─────────────────────────────
+def setProfile(username, height, age, sex, email=None):
     cursor.execute(
-        "INSERT OR REPLACE INTO profiles (username, height, age, sex) VALUES (?, ?, ?, ?)",
-        (username, height, age, sex),
+        "INSERT OR REPLACE INTO profiles (username, height, age, sex, email) VALUES (?, ?, ?, ?, ?)",
+        (username, height, age, sex, email.lower().strip() if email else None),
     )
     connection.commit()
 
 def getProfile(username):
     cursor.execute(
-        "SELECT height, age, sex FROM profiles WHERE username = ?",
+        "SELECT height, age, sex, email FROM profiles WHERE username = ?",
         (username,),
     )
-
     result = cursor.fetchone()
-    return result if result else (None, None, None)
+    return result if result else (None, None, None, None)
 
 
-
-
-
-
-
-
-
-
-
-
-
-# System Validation Functions
-
-# Username Validation
+# ─────────────────────────── Validation Functions ──────────────────────────
 def validateUsername(username: str):
-    """Return (True, '') or (False, errorMessage)."""
     if not username or not username.strip():
         return False, "Username cannot be empty."
     if len(username) < 3:
-        return False, "Username must be atleast 3 characters long."
+        return False, "Username must be at least 3 characters long."
     if not re.match("^[a-zA-Z0-9_]+$", username):
         return False, "Username can only contain letters, numbers and underscores."
     return True, ""
 
 
-# Password Validation
 def validatePassword(password: str):
     if not password:
         return False, "Password cannot be empty."
     if len(password) < 6:
-        return False, "Password must be atleast 6 characters long."
+        return False, "Password must be at least 6 characters long."
     return True, ""
 
 
-# Weight Validation
+def validateEmail(email: str):
+    if not email or not email.strip():
+        return False, "Email cannot be empty."
+    pattern = r"^[\w\.\+\-]+@[\w\-]+\.[a-zA-Z]{2,}$"
+    if not re.match(pattern, email.strip()):
+        return False, "Please enter a valid email address."
+    return True, ""
+
+
 def validateWeight(weight: float):
     if weight <= 0:
         return False, "Weight must be a positive number."
@@ -230,7 +270,7 @@ def validateWeight(weight: float):
     return True, ""
 
 
-# Data Functions
+# ─────────────────────────── Data Functions ────────────────────────────────
 def addData(username: str, weight: float, dateStr: str):
     cursor.execute(
         "INSERT INTO records (username, weight, date) VALUES (?, ?, ?)",
@@ -238,7 +278,6 @@ def addData(username: str, weight: float, dateStr: str):
     )
     connection.commit()
 
-#Fetch UserData
 def getUserData(username: str):
     cursor.execute(
         "SELECT id, weight, date FROM records WHERE username = ? ORDER BY date ASC",
@@ -246,7 +285,6 @@ def getUserData(username: str):
     )
     return cursor.fetchall()
 
-#Delete User Data
 def deleteData(recordId: int, username: str):
     cursor.execute(
         "DELETE FROM records WHERE id = ? AND username = ?",
@@ -254,7 +292,6 @@ def deleteData(recordId: int, username: str):
     )
     connection.commit()
 
-#Update User Data
 def updateData(recordId: int, newWeight: float, username: str):
     cursor.execute(
         "UPDATE records SET weight = ? WHERE id = ? AND username = ?",
@@ -263,21 +300,7 @@ def updateData(recordId: int, newWeight: float, username: str):
     connection.commit()
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-#Render Profile
+# ═══════════════════════════ PAGE: PROFILE ═══════════════════════════════
 def render_profile(username: str):
     col_title, col_back, col_logout = st.columns([5, 1, 1])
 
@@ -296,84 +319,83 @@ def render_profile(username: str):
             st.rerun()
         st.divider()
 
-    #Load Profile
-    height, age, sex = getProfile(username)
+    # Load Profile
+    height, age, sex, profile_email = getProfile(username)
+    account_email = getUserEmail(username)
 
     storedHeight = int(height) if height else 0
     defaultFeet = storedHeight // 12
     defaultInches = storedHeight % 12
 
+    # ── Personal Information ──────────────────────────────────────────────
     st.subheader("Personal Information")
 
     col1, col2 = st.columns(2)
 
     with col1:
         feet = st.number_input(
-            "Height (Ft)",
-            min_value = 0,
-            max_value = 8,
-            step = 1,
-            value = defaultFeet,
-    )
+            "Height (Ft)", min_value=0, max_value=8, step=1, value=defaultFeet,
+        )
         inches = st.number_input(
-            "Inches",
-            min_value =0,
-            max_value =11,
-            step =1,
-            value = defaultInches,
-    )
-        
-    with col2:
-        ageInput = st.number_input(
-            "Age",
-            min_value = 0,
-            value= age if age else 0,
+            "Inches", min_value=0, max_value=11, step=1, value=defaultInches,
         )
 
+    with col2:
+        ageInput = st.number_input(
+            "Age", min_value=0, value=age if age else 0,
+        )
         sexInput = st.selectbox(
-            "Sex",
-            ["Male", "Female"],
+            "Sex", ["Male", "Female"],
             index=0 if sex != "Female" else 1,
         )
 
-    if st.button ("Save Profile"):
-        totalInches = feet * 12 + inches
-        setProfile(username, totalInches, ageInput, sexInput)
-        st.success("Profile Updated!")
-        st.rerun()
-    
+    # Email field (pre-filled from users table)
+    emailInput = st.text_input(
+        "Email Address",
+        value=account_email or "",
+        placeholder="you@example.com",
+    )
+
+    if st.button("Save Profile"):
+        okE, msgE = validateEmail(emailInput)
+        if not okE:
+            st.error(msgE)
+        else:
+            totalInches = feet * 12 + inches
+            setProfile(username, totalInches, ageInput, sexInput, emailInput)
+            updateUserEmail(username, emailInput)
+            st.success("Profile Updated!")
+            st.rerun()
+
     st.divider()
 
-    #Password Change
+    # ── Change Password ───────────────────────────────────────────────────
     st.subheader("Change Password")
 
-    currentPw = st.text_input("Current Password", type= "password")
+    currentPw = st.text_input("Current Password", type="password")
     newPw = st.text_input("New Password", type="password")
-    confirmPw = st.text_input("Confirm New Password", type = "password")
+    confirmPw = st.text_input("Confirm New Password", type="password")
 
     if st.button("Update Password"):
         user = loginUser(username, currentPw)
-
         if not user:
             st.error("Current Password is incorrect")
         elif newPw != confirmPw:
             st.error("Passwords do not match")
         else:
-            cursor.execute(
-                "UPDATE users SET password = ? WHERE username = ?",
-                (hashPassword(newPw), username),
-            )
-            connection.commit()
-            st.success("Password Updated Successfully")
+            okP, msgP = validatePassword(newPw)
+            if not okP:
+                st.error(msgP)
+            else:
+                cursor.execute(
+                    "UPDATE users SET password = ? WHERE username = ?",
+                    (hashPassword(newPw), username),
+                )
+                connection.commit()
+                st.success("Password Updated Successfully")
 
 
-
-    st.info("Profile settings are managed in the Dashboard under 'Health Profile' section.")
-
-
-
-
-#Render Dashboard
+# ═══════════════════════════ PAGE: DASHBOARD ══════════════════════════════
 def render_dashboard(username: str):
     col_title, col_profile, col_logout = st.columns([5, 1, 1])
 
@@ -385,8 +407,6 @@ def render_dashboard(username: str):
         if st.button("Profile"):
             st.session_state["page"] = "Profile"
             st.rerun()
-
-    
 
     with col_logout:
         if st.button("Logout"):
@@ -404,17 +424,7 @@ def render_dashboard(username: str):
 
     has_data = not df.empty
 
-
-
-
-
-
-
-
-
-
-
-    # Add Weight Entry
+    # ── Add Weight Entry ──────────────────────────────────────────────────
     with st.expander("Add new Weight Entry", expanded=not has_data):
         weight = st.number_input("Weight (lbs)", min_value=0.0, step=0.1, format="%.1f")
         selectedDate = st.date_input("Date", value=date.today())
@@ -424,29 +434,17 @@ def render_dashboard(username: str):
             if not okW:
                 st.error(msgW)
             else:
-                addData(
-                    username,
-                    weight,
-                    selectedDate.strftime("%Y-%m-%d"),
-                )
+                addData(username, weight, selectedDate.strftime("%Y-%m-%d"))
                 st.success(f"Added {weight} lbs on {selectedDate.strftime('%Y-%m-%d')}.")
                 st.rerun()
 
-
-   
-
-
-
-
-
-
-#Goal
+    # ── Weight Goal ───────────────────────────────────────────────────────
     st.subheader("Weight Goal")
 
     currentGoal = getGoal(username)
 
     goalInput = st.number_input(
-        "Set your Goal Weight(lbs)",
+        "Set your Goal Weight (lbs)",
         min_value=0.0,
         step=0.1,
         value=currentGoal if currentGoal is not None else 0.0,
@@ -461,15 +459,7 @@ def render_dashboard(username: str):
             st.success("Goal Saved!")
             st.rerun()
 
-
-
-
-
-
-
-
-
-#Goal Progress Bar
+    # ── Goal Progress Bar ─────────────────────────────────────────────────
     if has_data and currentGoal is not None:
         latestWeight = df.sort_values("Date")["Weight"].iloc[-1]
         startWeight = df.sort_values("Date")["Weight"].iloc[0]
@@ -483,14 +473,14 @@ def render_dashboard(username: str):
         else:
             progress = 0.0
 
-        st.write(f"Current Weight: **{latestWeight: .1f} lbs**")
-        st.write(f"Goal Weight: **{currentGoal: .1f} lbs**")
+        st.write(f"Current Weight: **{latestWeight:.1f} lbs**")
+        st.write(f"Goal Weight: **{currentGoal:.1f} lbs**")
 
         remaining = abs(latestWeight - currentGoal)
 
         if currentGoal < latestWeight:
             st.caption("Goal: Weight Loss")
-            st.write(f"Remaining to Loose: **{remaining: .1f} lbs**")
+            st.write(f"Remaining to Lose: **{remaining:.1f} lbs**")
         else:
             st.caption("Goal: Weight Gain")
             st.write(f"Remaining to Gain: **{remaining:.1f} lbs**")
@@ -504,9 +494,7 @@ def render_dashboard(username: str):
     else:
         st.info("Record weights and set a goal to see progress.")
 
-
-#Filter Records
-
+    # ── Filter Records ────────────────────────────────────────────────────
     st.subheader("Filter Records")
     col_f1, col_f2, col_f3, col_f4 = st.columns(4)
 
@@ -526,42 +514,25 @@ def render_dashboard(username: str):
         st.session_state["filter_max_w"] = max_w_data
 
     with col_f1:
-        filter_start = st.date_input(
-            "From Date", key="filter_start", disabled=not has_data
-        )
-
+        filter_start = st.date_input("From Date", key="filter_start", disabled=not has_data)
     with col_f2:
-        filter_end = st.date_input(
-            "To Date", key="filter_end", disabled=not has_data
-        )
-
+        filter_end = st.date_input("To Date", key="filter_end", disabled=not has_data)
     with col_f3:
         filter_min_w = st.number_input(
-            "Min Weight",
-            step=0.1,
-            format="%.1f",
-            key="filter_min_w",
-            disabled=not has_data,
+            "Min Weight", step=0.1, format="%.1f", key="filter_min_w", disabled=not has_data,
         )
-
     with col_f4:
         filter_max_w = st.number_input(
-            "Max Weight",
-            step=0.1,
-            format="%.1f",
-            key="filter_max_w",
-            disabled=not has_data,
+            "Max Weight", step=0.1, format="%.1f", key="filter_max_w", disabled=not has_data,
         )
-
 
     if has_data:
         if filter_start > filter_end:
-            st.warning("'From Date' is after 'To Date'. Showing all Dates.")
+            st.warning("'From Date' is after 'To Date'. Showing all dates.")
             filter_start = min_date_data
             filter_end = max_date_data
-
         if filter_min_w > filter_max_w:
-            st.warning("'Min Weight' is greater than 'Max Weight'. Showing all Weights.")
+            st.warning("'Min Weight' is greater than 'Max Weight'. Showing all weights.")
             filter_min_w = min_w_data
             filter_max_w = max_w_data
 
@@ -571,18 +542,11 @@ def render_dashboard(username: str):
             & (df["Weight"] >= filter_min_w)
             & (df["Weight"] <= filter_max_w)
         ]
-        st.caption(
-            f"Showing **{len(df_filtered)}** of **{len(df)}** records based on filters."
-        )
+        st.caption(f"Showing **{len(df_filtered)}** of **{len(df)}** records based on filters.")
     else:
-        df_filtered = df.copy()  # empty DataFrame
+        df_filtered = df.copy()
 
-
-
-
-
-
-    # Weight Trend Chart
+    # ── Weight Trend Chart ────────────────────────────────────────────────
     st.subheader("Weight Trend")
     if has_data and not df_filtered.empty:
         df_grouped = (
@@ -591,11 +555,8 @@ def render_dashboard(username: str):
             .sort_values("Date")
         )
         fig = px.line(
-            df_grouped,
-            x="Date",
-            y="Weight",
-            markers=True,
-            title="Weight Over Time (Filtered)",
+            df_grouped, x="Date", y="Weight",
+            markers=True, title="Weight Over Time (Filtered)",
         )
         fig.update_yaxes(
             range=[
@@ -607,37 +568,20 @@ def render_dashboard(username: str):
     else:
         empty_fig = px.line(title="Weight Over Time")
         empty_fig.update_layout(
-            annotations=[
-                {
-                    "text": "No data yet — add your first entry above!",
-                    "xref": "paper",
-                    "yref": "paper",
-                    "x": 0.5,
-                    "y": 0.5,
-                    "showarrow": False,
-                    "font": {"size": 16, "color": "gray"},
-                }
-            ]
+            annotations=[{
+                "text": "No data yet — add your first entry above!",
+                "xref": "paper", "yref": "paper",
+                "x": 0.5, "y": 0.5, "showarrow": False,
+                "font": {"size": 16, "color": "gray"},
+            }]
         )
         st.plotly_chart(empty_fig, use_container_width=True)
 
-
-
-
-
-
-
-
-
-
-    # Metrics Summary
+    # ── Summary Metrics ───────────────────────────────────────────────────
     st.subheader("Summary Metrics")
     c1, c2, c3, c4 = st.columns(4)
     if has_data and not df_filtered.empty:
-        c1.metric(
-            "Latest Weight",
-            f"{df_filtered.sort_values('Date')['Weight'].iloc[-1]:.1f} lbs",
-        )
+        c1.metric("Latest Weight", f"{df_filtered.sort_values('Date')['Weight'].iloc[-1]:.1f} lbs")
         c2.metric("Average Weight", f"{df_filtered['Weight'].mean():.1f} lbs")
         c3.metric("Lowest Weight", f"{df_filtered['Weight'].min():.1f} lbs")
         c4.metric("Highest Weight", f"{df_filtered['Weight'].max():.1f} lbs")
@@ -647,26 +591,17 @@ def render_dashboard(username: str):
         c3.metric("Lowest Weight", "-")
         c4.metric("Highest Weight", "-")
 
-
-
-
-
-
-
-
+    # ── BMI ───────────────────────────────────────────────────────────────
     st.subheader("BMI")
-
-    height, age, sex = getProfile(username)
+    height, age, sex, _ = getProfile(username)
 
     if has_data and height:
-        latestWeight = df.sort_values("Date") ["Weight"].iloc[-1]
-
+        latestWeight = df.sort_values("Date")["Weight"].iloc[-1]
         weightKg = latestWeight * 0.453592
         heightM = height * 0.0254
-
         bmi = weightKg / (heightM ** 2)
 
-        st.metric("Your BMI", f"{bmi: .1f}")
+        st.metric("Your BMI", f"{bmi:.1f}")
 
         if bmi < 18.5:
             category = "Underweight"
@@ -677,18 +612,11 @@ def render_dashboard(username: str):
         else:
             category = "Obese"
 
-        st.write(f"Category: **{category} **")
+        st.write(f"Category: **{category}**")
     else:
-        st.info("Add your profile and weight to see BMI")
+        st.info("Add your profile and weight to see BMI.")
 
-    
-
-
-
-    
-
-
-    # Edit and Delete Records
+    # ── Edit / Delete Records ─────────────────────────────────────────────
     st.subheader("Edit or Delete a Record")
     if has_data and not df_filtered.empty:
         options = [
@@ -704,7 +632,7 @@ def render_dashboard(username: str):
 
         with col_e1:
             newWeight = st.number_input(
-                "New Weight(lbs)", min_value=0.0, step=0.1, format="%.1f", key="edit_w"
+                "New Weight (lbs)", min_value=0.0, step=0.1, format="%.1f", key="edit_w"
             )
             if st.button("Update Entry"):
                 okW, msgW = validateWeight(newWeight)
@@ -725,7 +653,7 @@ def render_dashboard(username: str):
     else:
         st.info("No entries to edit or delete yet.")
 
-    # Raw Data Table
+    # ── Raw Data Table ────────────────────────────────────────────────────
     with st.expander("View Raw Data Table"):
         if has_data and not df_filtered.empty:
             display_df = df_filtered[["Date", "Weight"]].copy()
@@ -736,17 +664,12 @@ def render_dashboard(username: str):
             )
             st.dataframe(display_df, use_container_width=True)
         else:
-            st.info("No Data Yet - Add your first weight entry to see the trend and metrics!")
+            st.info("No Data Yet — Add your first weight entry to see the trend and metrics!")
 
 
+# ═══════════════════════════ SIDEBAR ══════════════════════════════════════
+ALL_PAGES = ["Login", "Sign Up", "Forgot Password", "Forgot Username", "Dashboard", "Profile"]
 
-
-
-
-
-
-
-# Sidebar Navigation
 with st.sidebar:
     st.markdown("Weight Tracker")
     st.divider()
@@ -757,8 +680,8 @@ with st.sidebar:
 
     menu = st.selectbox(
         "Navigation",
-        ["Login", "Sign Up", "Dashboard", "Profile"],
-        index=["Login", "Sign Up", "Dashboard", "Profile"].index(st.session_state["page"]),
+        ALL_PAGES,
+        index=ALL_PAGES.index(st.session_state["page"]),
     )
     if menu != st.session_state["page"]:
         st.session_state["page"] = menu
@@ -772,15 +695,7 @@ with st.sidebar:
             st.rerun()
 
 
-
-
-
-
-
-
-
-
-# Login Page
+# ═══════════════════════════ PAGE: LOGIN ══════════════════════════════════
 if menu == "Login":
     st.title("Login")
     username = st.text_input("Username")
@@ -804,103 +719,150 @@ if menu == "Login":
             else:
                 st.error("Invalid Username or Password")
 
-    if st.button("Go to Sign Up"):
-        st.session_state["page"] = "Sign Up"
-        st.rerun()
+    col_a, col_b, col_c = st.columns(3)
+    with col_a:
+        if st.button("Go to Sign Up"):
+            st.session_state["page"] = "Sign Up"
+            st.rerun()
+    with col_b:
+        if st.button("Forgot Password?"):
+            st.session_state["page"] = "Forgot Password"
+            st.rerun()
+    with col_c:
+        if st.button("Forgot Username?"):
+            st.session_state["page"] = "Forgot Username"
+            st.rerun()
 
 
-
-
-
-
-
-
-
-
-
-
-# Signup Page
+# ═══════════════════════════ PAGE: SIGN UP ════════════════════════════════
 elif menu == "Sign Up":
-    st.title("Signup")
+    st.title("Sign Up")
+
     newUsername = st.text_input("Create Username")
+    newEmail    = st.text_input("Email Address", placeholder="you@example.com")
     newPassword = st.text_input("Create Password", type="password")
     confirmPassword = st.text_input("Confirm Password", type="password")
 
     st.subheader("Optional Profile Info")
     col1, col2, col3 = st.columns(3)
-    with col1: 
-        feet = st.number_input("Height(ft)", min_value = 0, max_value = 8, step = 1)
-
+    with col1:
+        feet = st.number_input("Height (ft)", min_value=0, max_value=8, step=1)
     with col2:
-        inches = st.number_input("Inches", min_value = 0, max_value = 11, step = 1)
-
+        inches = st.number_input("Inches", min_value=0, max_value=11, step=1)
     with col3:
-        ageInput = st.number_input("Age", min_value = 0)
-        
+        ageInput = st.number_input("Age", min_value=0)
         sexInput = st.selectbox("Sex", ["Prefer not to say", "Male", "Female"])
-
 
     if st.button("Create Account", type="primary"):
         okU, msgU = validateUsername(newUsername)
+        okE, msgE = validateEmail(newEmail)
         okP, msgP = validatePassword(newPassword)
 
         if not okU:
             st.error(msgU)
+        elif not okE:
+            st.error(msgE)
         elif not okP:
             st.error(msgP)
         elif newPassword != confirmPassword:
             st.error("Passwords do not match!")
         else:
-            success = createUser(newUsername, newPassword)
+            success = createUser(newUsername, newPassword, newEmail)
             if success:
                 totalInches = feet * 12 + inches
-                if (
-                    totalInches > 0
-                    or ageInput > 0
-                    or sexInput != "Prefer not to say"
-                ):
+                if totalInches > 0 or ageInput > 0 or sexInput != "Prefer not to say":
                     setProfile(
                         newUsername,
                         totalInches if totalInches > 0 else None,
                         ageInput if ageInput > 0 else None,
                         sexInput if sexInput != "Prefer not to say" else None,
+                        newEmail,
                     )
-                st.success("Account Created Successfully")
+                st.success("Account Created Successfully!")
                 st.session_state["page"] = "Login"
-                st.info("Please Login with your new account")
+                st.info("Please log in with your new account.")
                 st.rerun()
             else:
-                st.error("Username already exists!")
-    
-    
-    
+                st.error("Username or email already exists.")
 
     if st.button("Back to Login"):
         st.session_state["page"] = "Login"
         st.rerun()
 
 
+# ═══════════════════════════ PAGE: FORGOT PASSWORD ════════════════════════
+elif menu == "Forgot Password":
+    st.title("Forgot Password")
+    st.info(
+        "Enter your username below. A new temporary password will be generated for you. "
+        "Use it to log in, then change it in your Profile settings."
+    )
+
+    fp_username = st.text_input("Username")
+
+    if st.button("Reset Password", type="primary"):
+        if not fp_username.strip():
+            st.error("Please enter your username.")
+        else:
+            email, new_pw = forgotPassword(fp_username.strip())
+            if email is None:
+                st.error("Username not found.")
+            else:
+                # In a production app you would email `new_pw` to `email`.
+                # Here we display it directly so the demo is self-contained.
+                st.success("A new temporary password has been generated.")
+                st.warning(
+                    f"Your temporary password is: **`{new_pw}`**\n\n"
+                    f"_(In production this would be sent to: {email})_\n\n"
+                    "Please log in and update your password immediately."
+                )
+
+    if st.button("Back to Login"):
+        st.session_state["page"] = "Login"
+        st.rerun()
 
 
+# ═══════════════════════════ PAGE: FORGOT USERNAME ════════════════════════
+elif menu == "Forgot Username":
+    st.title("Forgot Username")
+    st.info("Enter the email address associated with your account to retrieve your username.")
+
+    fu_email = st.text_input("Email Address", placeholder="you@example.com")
+
+    if st.button("Find Username", type="primary"):
+        okE, msgE = validateEmail(fu_email)
+        if not okE:
+            st.error(msgE)
+        else:
+            found_username = forgotUsername(fu_email)
+            if found_username is None:
+                st.error("No account found with that email address.")
+            else:
+                # In production, email this to the user instead of displaying it.
+                st.success("Account found!")
+                st.info(
+                    f"Your username is: **`{found_username}`**\n\n"
+                    f"_(In production this would be sent to: {fu_email})_"
+                )
+
+    if st.button("Back to Login"):
+        st.session_state["page"] = "Login"
+        st.rerun()
 
 
-
-
-
-# Dashboard Page
+# ═══════════════════════════ PAGE: DASHBOARD ══════════════════════════════
 elif menu == "Dashboard":
     if "user" not in st.session_state:
-        st.warning("Please Login to access the Dashboard")
+        st.warning("Please log in to access the Dashboard.")
         st.session_state["page"] = "Login"
         st.rerun()
-
     render_dashboard(st.session_state["user"])
 
+
+# ═══════════════════════════ PAGE: PROFILE ════════════════════════════════
 elif menu == "Profile":
     if "user" not in st.session_state:
-        st.warning("Please Login to Access Profile")
+        st.warning("Please log in to access your Profile.")
         st.session_state["page"] = "Login"
         st.rerun()
-
     render_profile(st.session_state["user"])
-
