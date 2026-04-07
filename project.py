@@ -64,7 +64,7 @@ def get_connection():
 CREATE TABLE IF NOT EXISTS users (
     username TEXT PRIMARY KEY,
     password TEXT,
-    email    TEXT UNIQUE
+    email    TEXT
 )
 """
     )
