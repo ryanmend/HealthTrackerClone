@@ -1,2 +1,2 @@
-# HealthTrackerClone
-Clone of JoshMat003/HealthTracker for testing purposes
+# HealthTracker
+Simple HealthTracker App
